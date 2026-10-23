@@ -9,7 +9,7 @@ export type Member = {
   id: string;
   email: string;
   name: string;
-  role: "admin" | "member";
+  role: "super_admin" | "member";
 };
 
 export type Invitation = {
@@ -49,7 +49,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export const getMe = () => request<{ user: Account }>("/api/me");
 export const getTeam = () => request<Team>("/api/team");
 export const inviteMember = (email: string) =>
-  request<{ message: string }>("/api/invitations", {
+  request<{ message: string; invitationPath: string }>("/api/invitations", {
     method: "POST",
     body: JSON.stringify({ email }),
   });
@@ -57,3 +57,10 @@ export const revokeInvitation = (id: string) =>
   request<{ message: string }>(`/api/invitations/${encodeURIComponent(id)}`, { method: "DELETE" });
 export const revokeMember = (id: string) =>
   request<{ message: string }>(`/api/members/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const login = (email: string, password: string) =>
+  request<{user: Account}>("/api/auth/login", {method:"POST",body:JSON.stringify({email,password})});
+export const logout = () => request<{message:string}>("/api/auth/logout", {method:"POST",body:"{}"});
+export const activate = (token:string, password:string, name:string) =>
+  request<{message:string}>("/api/auth/activate",{method:"POST",body:JSON.stringify({token,password,name})});
+export const changePassword = (oldPassword:string, password:string) =>
+  request<{message:string}>("/api/auth/password",{method:"POST",body:JSON.stringify({oldPassword,password})});

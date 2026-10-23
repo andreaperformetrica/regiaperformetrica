@@ -4,7 +4,7 @@ Gestore di attività per il team di Performetrica. Prende spunto da ClickUp e As
 
 L’app operativa originale resta in `index.html` (HTML, CSS e JavaScript).
 Su Replit è protetta da un server Express e da pagine di accesso React con
-Clerk; solo gli account autorizzati dal team possono caricarla.
+un login email/password gestito da Regia; solo gli account autorizzati dal team possono caricarla.
 
 ## Avvio su Replit
 

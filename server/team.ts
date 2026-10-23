@@ -1,187 +1,192 @@
 import { Router, type RequestHandler } from "express";
-import { clerkClient, getAuth } from "@clerk/express";
-import { accountFor, normalizeEmail, validEmail, verifiedEmail } from "./access";
-import { getClerkProxyHost } from "./middlewares/clerkProxyMiddleware";
+import type pg from "pg";
+import { randomUUID } from "node:crypto";
+import { accountFor, checkPassword, hashPassword, newToken, normalizeEmail, tokenHash, validEmail, validPassword, type AccountRow } from "./access";
 
-type Client = typeof clerkClient;
-type User = Awaited<ReturnType<Client["users"]["getUser"]>>;
-type Account = NonNullable<ReturnType<typeof accountFor>>;
+const COOKIE = "regia_session";
+const DAYS = 7;
+declare global { namespace Express { interface Locals {
+  account: ReturnType<typeof accountFor>; accountRow: AccountRow;
+} } }
 
-declare global {
-  namespace Express {
-    interface Locals {
-      account: Account;
-      clerkUser: User;
-    }
-  }
+export function publicHost(req: { headers: Record<string, any> }) {
+  return String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
 }
-
-export function teamGuard(
-  client: Client = clerkClient,
-  sessionUserId: (req: Parameters<typeof getAuth>[0]) => string | null =
-    (req) => getAuth(req).userId,
-): RequestHandler {
+export const sameOrigin: RequestHandler = (req, res, next) => {
+  try {
+    const url = new URL(req.get("origin") || "");
+    if (url.host !== publicHost(req) || !["https:", "http:"].includes(url.protocol)) throw new Error();
+    next();
+  } catch { res.status(403).json({ error: "Origine della richiesta non valida." }); }
+};
+function sessionToken(req: Parameters<RequestHandler>[0]) {
+  const value = req.headers.cookie?.split(";").map((s) => s.trim()).find((s) => s.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
+  return value && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+function cookieOptions(req: Parameters<RequestHandler>[0]) {
+  return { httpOnly: true, secure: req.secure, sameSite: "lax" as const, path: "/" };
+}
+export function teamGuard(db: pg.Pool): RequestHandler {
   return async (req, res, next) => {
     try {
-      const userId = sessionUserId(req);
-      if (!userId) {
-        res.status(401).json({ error: "Accedi per continuare.", code: "SIGNED_OUT" });
-        return;
-      }
-      const user = await client.users.getUser(userId);
-      const account = accountFor(user);
-      if (!account) {
-        res.status(403).json({
-          error: "Questo account non è autorizzato. Chiedi un invito all’amministratore del team.",
-          code: "INVITATION_REQUIRED",
-        });
-        return;
-      }
-      res.locals.account = account;
-      res.locals.clerkUser = user;
+      const token = sessionToken(req);
+      const result = token ? await db.query<AccountRow>(
+        `SELECT a.* FROM regia_sessions s JOIN regia_accounts a ON a.id=s.account_id
+         WHERE s.token_hash=$1 AND s.expires_at>now() AND a.active=true`, [tokenHash(token)]) : null;
+      const row = result?.rows[0];
+      if (!row) { res.status(401).json({ error: "Accedi con email e password.", code: "SIGNED_OUT" }); return; }
+      res.locals.accountRow = row;
+      res.locals.account = accountFor(row);
       next();
-    } catch (error) {
-      next(error);
-    }
+    } catch (error) { next(error); }
   };
 }
+async function limited(db: pg.Pool, key: string, max: number) {
+  const result = await db.query(
+    `INSERT INTO regia_auth_limits(key,attempts,expires_at) VALUES($1,1,now()+interval '15 minutes')
+     ON CONFLICT(key) DO UPDATE SET
+     attempts=CASE WHEN regia_auth_limits.expires_at<now() THEN 1 ELSE regia_auth_limits.attempts+1 END,
+     expires_at=CASE WHEN regia_auth_limits.expires_at<now() THEN now()+interval '15 minutes' ELSE regia_auth_limits.expires_at END
+     RETURNING attempts`, [tokenHash(key)]);
+  return result.rows[0].attempts > max;
+}
 
-export const adminGuard: RequestHandler = (_req, res, next) => {
-  if (!res.locals.account.isAdmin) {
-    res.status(403).json({ error: "Questa operazione è riservata all’amministratore.", code: "ADMIN_REQUIRED" });
-    return;
-  }
-  next();
-};
-
-export const sameOrigin: RequestHandler = (req, res, next) => {
-  const origin = req.get("origin");
-  const host = getClerkProxyHost(req);
-  try {
-    const url = new URL(origin || "");
-    if (!host || url.host !== host || !["https:", "http:"].includes(url.protocol)) throw new Error();
-  } catch {
-    res.status(403).json({ error: "Origine della richiesta non valida.", code: "INVALID_ORIGIN" });
-    return;
-  }
-  next();
-};
-
-export function createTeamRouter(client: Client = clerkClient, guard: RequestHandler = teamGuard(client)) {
+export async function createTeamRouter(db: pg.Pool) {
   const router = Router();
-  const invitationTimes = new Map<string, number[]>();
-  router.use(guard);
+  const dummyHash = await hashPassword(newToken());
+  router.post("/auth/login", sameOrigin, async (req, res) => {
+    const email = validEmail(req.body?.email) ? normalizeEmail(req.body.email) : "";
+    if (await limited(db, "ip:" + req.ip, 60) || await limited(db, "email:" + email, 10)) {
+      res.status(429).json({ error: "Troppi tentativi. Riprova tra 15 minuti." }); return;
+    }
+    if (!email || typeof req.body?.password !== "string" || req.body.password.length > 128) {
+      res.status(401).json({ error: "Email o password non corretti." }); return;
+    }
+    const result = await db.query<AccountRow>("SELECT * FROM regia_accounts WHERE email=$1", [email]);
+    const row = result.rows[0];
+    const valid = await checkPassword(req.body.password, row?.password_hash || dummyHash);
+    if (!row?.active || !row.password_hash || !valid) {
+      res.status(401).json({ error: "Email o password non corretti." }); return;
+    }
+    const token = newToken();
+    await db.query("INSERT INTO regia_sessions(token_hash,account_id,expires_at) VALUES($1,$2,now()+interval '7 days')", [tokenHash(token), row.id]);
+    res.cookie(COOKIE, token, { ...cookieOptions(req), maxAge: DAYS * 86400000 });
+    res.json({ user: accountFor(row) });
+  });
+  router.post("/auth/logout", sameOrigin, async (req, res) => {
+    const token = sessionToken(req);
+    if (token) await db.query("DELETE FROM regia_sessions WHERE token_hash=$1", [tokenHash(token)]);
+    res.clearCookie(COOKIE, cookieOptions(req));
+    res.json({ message: "Disconnessione effettuata." });
+  });
+  router.post("/auth/activate", sameOrigin, async (req, res) => {
+    if (await limited(db, "activate:" + req.ip, 30)) {
+      res.status(429).json({ error: "Troppi tentativi. Riprova più tardi." }); return;
+    }
+    if (!validPassword(req.body?.password) || !/^[a-f0-9]{64}$/.test(req.body?.token || "")) {
+      res.status(400).json({ error: "Serve un link valido e una password da 12 a 128 caratteri." }); return;
+    }
+    const hash = await hashPassword(req.body.password);
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const found = await client.query(
+        `SELECT * FROM regia_invitations WHERE token_hash=$1 AND expires_at>now()
+         AND used_at IS NULL AND revoked_at IS NULL FOR UPDATE`, [tokenHash(req.body.token)]);
+      if (!found.rows[0]) {
+        await client.query("ROLLBACK");
+        res.status(400).json({ error: "Il link è scaduto, revocato o già utilizzato." }); return;
+      }
+      const invite = found.rows[0];
+      const id = randomUUID();
+      const account = await client.query(
+        `INSERT INTO regia_accounts(id,email,name,password_hash,storage_id)
+         VALUES($1::uuid,$2,$3,$4,$1::text) ON CONFLICT(email) DO UPDATE
+         SET password_hash=$4,active=true,name=CASE WHEN $3='' THEN regia_accounts.name ELSE $3 END
+         WHERE regia_accounts.role='member' RETURNING id`,
+        [id, invite.email, typeof req.body.name === "string" ? req.body.name.trim().slice(0, 100) : "", hash]);
+      if (!account.rows[0]) throw new Error("Protected administrator");
+      await client.query("DELETE FROM regia_sessions WHERE account_id=$1", [account.rows[0].id]);
+      await client.query("UPDATE regia_invitations SET used_at=now() WHERE id=$1", [invite.id]);
+      await client.query("COMMIT");
+      res.json({ message: "Password salvata. Ora puoi accedere con email e password.", email: invite.email });
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  });
+  router.use(teamGuard(db));
   router.get("/me", (_req, res) => res.json({ user: res.locals.account }));
-  router.use(adminGuard);
-
+  router.post("/auth/password", sameOrigin, async (req, res) => {
+    if (await limited(db, "password:" + res.locals.account.id, 10)) {
+      res.status(429).json({ error: "Troppi tentativi. Riprova tra 15 minuti." }); return;
+    }
+    if (typeof req.body?.oldPassword !== "string" || req.body.oldPassword.length > 128 ||
+        !validPassword(req.body?.password)) {
+      res.status(400).json({ error: "Inserisci la password attuale e una nuova password da 12 a 128 caratteri." }); return;
+    }
+    if (!await checkPassword(req.body.oldPassword, res.locals.accountRow.password_hash!)) {
+      res.status(400).json({ error: "La password attuale non è corretta." }); return;
+    }
+    const hash = await hashPassword(req.body.password);
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("UPDATE regia_accounts SET password_hash=$2 WHERE id=$1", [res.locals.account.id, hash]);
+      await client.query("DELETE FROM regia_sessions WHERE account_id=$1", [res.locals.account.id]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    res.clearCookie(COOKIE, cookieOptions(req));
+    res.json({ message: "Password aggiornata. Accedi nuovamente." });
+  });
+  router.use((_req, res, next) => {
+    if (!res.locals.account.isAdmin) { res.status(403).json({ error: "Operazione riservata al super admin.", code: "ADMIN_REQUIRED" }); return; }
+    next();
+  });
   router.get("/team", async (_req, res) => {
-    const users: User[] = [];
-    for (let offset = 0; ; offset += 100) {
-      const page = await client.users.getUserList({ limit: 100, offset });
-      users.push(...page.data);
-      if (offset + page.data.length >= page.totalCount || !page.data.length) break;
-    }
-    const invitations = [];
-    for (let offset = 0; ; offset += 100) {
-      const page = await client.invitations.getInvitationList({ status: "pending", limit: 100, offset });
-      invitations.push(...page.data);
-      if (offset + page.data.length >= page.totalCount || !page.data.length) break;
-    }
-    res.json({
-      members: users.flatMap((user) => {
-        const account = accountFor(user);
-        return account ? [{ id: account.id, email: account.email, name: account.name, role: account.isAdmin ? "admin" : "member" }] : [];
-      }),
-      invitations: invitations
-        .filter((invitation) => invitation.publicMetadata?.regiaAccess === true)
-        .map((invitation) => ({
-          id: invitation.id,
-          email: invitation.emailAddress,
-          status: invitation.status,
-          createdAt: invitation.createdAt,
-        })),
-    });
+    const members = await db.query("SELECT id,email,name,role FROM regia_accounts WHERE active=true AND password_hash IS NOT NULL ORDER BY created_at");
+    const invitations = await db.query(
+      `SELECT id,email,'pending' AS status,extract(epoch FROM created_at)*1000 AS "createdAt"
+       FROM regia_invitations WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at DESC`);
+    res.json({ members: members.rows, invitations: invitations.rows.map((r) => ({ ...r, createdAt: Number(r.createdAt) })) });
   });
-
   router.post("/invitations", sameOrigin, async (req, res) => {
-    if (!validEmail(req.body?.email)) {
-      res.status(400).json({ error: "Inserisci un indirizzo email valido." });
-      return;
-    }
-    const adminId = res.locals.account.id;
-    const now = Date.now();
-    const times = (invitationTimes.get(adminId) || []).filter((time) => now - time < 3_600_000);
-    if (times.length >= 20) {
-      res.status(429).json({ error: "Hai raggiunto il limite di 20 inviti all’ora. Riprova più tardi." });
-      return;
-    }
-    invitationTimes.set(adminId, [...times, now]);
+    if (!validEmail(req.body?.email)) { res.status(400).json({ error: "Inserisci un’email valida." }); return; }
     const email = normalizeEmail(req.body.email);
-    const existing = await client.users.getUserList({ emailAddress: [email], limit: 100 });
-    if (existing.data.length) {
-      const user = existing.data.find((entry) => verifiedEmail(entry) === email);
-      if (!user) {
-        res.status(409).json({ error: "L’account esiste, ma l’email principale non è verificata. Chiedi alla persona di verificarla prima di invitarla." });
-        return;
-      }
-      if (accountFor(user)) {
-        res.status(409).json({ error: "Questa persona ha già accesso a Regia." });
-        return;
-      }
-      await client.users.updateUserMetadata(user.id, {
-        publicMetadata: { regiaAccess: true, regiaRole: "member" },
-      });
-      res.json({ message: "L’account esiste già: accesso al team abilitato. Non è stata inviata un’email; comunica alla persona il link di Regia per accedere." });
-      return;
-    }
-    const pending = await client.invitations.getInvitationList({ status: "pending", query: email, limit: 100 });
-    if (pending.data.some((entry) => normalizeEmail(entry.emailAddress) === email)) {
-      res.status(409).json({ error: "Esiste già un invito in attesa per questa email." });
-      return;
-    }
-    const origin = new URL(req.get("origin")!).origin;
-    await client.invitations.createInvitation({
-      emailAddress: email,
-      redirectUrl: `${origin}/sign-up`,
-      expiresInDays: 7,
-      notify: true,
-      publicMetadata: { regiaAccess: true, regiaRole: "member" },
+    const existing = await db.query<AccountRow>("SELECT * FROM regia_accounts WHERE email=$1", [email]);
+    if (existing.rows[0]?.role === "super_admin") { res.status(409).json({ error: "Questo indirizzo è riservato al super admin." }); return; }
+    if (await limited(db, "invite:" + res.locals.account.id, 30)) { res.status(429).json({ error: "Troppi inviti. Riprova più tardi." }); return; }
+    const token = newToken();
+    const created = await db.query(
+      `INSERT INTO regia_invitations(id,email,token_hash,expires_at,created_by)
+       VALUES($1,$2,$3,now()+interval '7 days',$4)
+       ON CONFLICT(email) DO UPDATE SET id=$1,token_hash=$3,expires_at=now()+interval '7 days',
+       used_at=NULL,revoked_at=NULL,created_at=now(),created_by=$4 RETURNING id`,
+      [randomUUID(), email, tokenHash(token), res.locals.account.id]);
+    res.status(201).json({
+      message: existing.rows[0]?.password_hash ? "Link per reimpostare la password creato. Condividilo solo con la persona interessata." :
+        "Invito creato. Copia il link e condividilo con la persona invitata. Non è stata inviata un’email.",
+      invitationPath: `/sign-up#token=${token}`, id: created.rows[0].id,
     });
-    res.status(201).json({ message: "Invito inviato tramite Clerk. Il link per creare l’account scade tra 7 giorni." });
   });
-
   router.delete("/invitations/:id", sameOrigin, async (req, res) => {
-    // Only invitations created for Regia may be revoked here.
-    let found = false;
-    for (let offset = 0; !found; offset += 100) {
-      const page = await client.invitations.getInvitationList({ status: "pending", limit: 100, offset });
-      found = page.data.some((entry) => entry.id === req.params.id && entry.publicMetadata?.regiaAccess === true);
-      if (found || !page.data.length || offset + page.data.length >= page.totalCount) break;
-    }
-    if (!found) {
-      res.status(404).json({ error: "Invito non trovato o non più in attesa." });
-      return;
-    }
-    await client.invitations.revokeInvitation(String(req.params.id));
-    res.json({ message: "Invito revocato. Il link non è più utilizzabile." });
+    const result = await db.query("UPDATE regia_invitations SET revoked_at=now() WHERE id::text=$1 AND used_at IS NULL AND revoked_at IS NULL RETURNING id", [req.params.id]);
+    res.status(result.rowCount ? 200 : 404).json({ message: "Invito revocato.", error: result.rowCount ? undefined : "Invito non trovato." });
   });
-
   router.delete("/members/:id", sameOrigin, async (req, res) => {
-    const user = await client.users.getUser(String(req.params.id));
-    const account = accountFor(user);
-    if (!account) {
-      res.status(404).json({ error: "Persona non presente nel team." });
-      return;
-    }
-    if (account.isAdmin || account.id === res.locals.account.id) {
-      res.status(409).json({ error: "Non puoi rimuovere l’accesso dell’amministratore." });
-      return;
-    }
-    await client.users.updateUserMetadata(user.id, {
-      publicMetadata: { regiaAccess: false, regiaRole: "member" },
-    });
-    res.json({ message: "Accesso revocato. I dati locali della persona non sono stati eliminati." });
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query("UPDATE regia_accounts SET active=false WHERE id::text=$1 AND role='member' RETURNING id,email", [req.params.id]);
+      if (!result.rows[0]) {
+        await client.query("ROLLBACK");
+        res.status(409).json({ error: "Non puoi rimuovere il super admin o un account inesistente." }); return;
+      }
+      await client.query("DELETE FROM regia_sessions WHERE account_id=$1", [result.rows[0].id]);
+      await client.query("UPDATE regia_invitations SET revoked_at=now() WHERE email=$1 AND used_at IS NULL", [result.rows[0].email]);
+      await client.query("COMMIT");
+      res.json({ message: "Accesso revocato. I dati locali non sono stati eliminati." });
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
   });
-
   return router;
 }

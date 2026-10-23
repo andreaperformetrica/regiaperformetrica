@@ -239,8 +239,18 @@ a { color: inherit; }
 .team-error { display: flex; justify-content: space-between; gap: 16px; margin: 16px 20px; border: 1px solid #f0cacc; border-radius: 6px; padding: 11px 12px; color: var(--danger); background: #fff7f7; font-size: 12px; }
 .small-button { border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; color: var(--fg); background: #fff; font-size: 11px; font-weight: 600; cursor: pointer; }
 .privacy-note { margin-top: 18px; color: var(--fg-muted); font-size: 11px; line-height: 1.6; }
-.cl-formFieldInput::placeholder { color: #777985 !important; opacity: 1 !important; }
-.cl-formFieldInput:focus { box-shadow: 0 0 0 3px rgb(79 82 217 / 18%) !important; }
+.login-form { display:grid; gap:20px; padding:28px; background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); }
+.login-form .field { display:grid; gap:8px; }
+.login-form input:not([type="checkbox"]) { width:100%; min-height:48px; border:1px solid var(--line-strong); border-radius:7px; padding:10px 12px; color:var(--fg); background:var(--surface); font-size:16px; }
+.login-form .primary-button { width:100%; min-height:48px; }
+.show-password { display:flex; align-items:center; gap:9px; font-size:14px; color:var(--fg-soft); cursor:pointer; }
+.show-password input { width:18px; height:18px; accent-color:var(--accent); }
+.invitation-link { margin-top:18px; display:grid; gap:10px; }
+.invitation-link input { width:100%; padding:12px; border:1px solid var(--line-strong); border-radius:6px; font-size:14px; }
+.team-section { overflow-wrap:anywhere; }
+.team-section > h2 { padding:20px 20px 0; }
+.team-section > .privacy-note, .team-section > .invitation-link { margin:16px 20px; }
+.portal-tools { flex-wrap:wrap; }
 @keyframes enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes shimmer { to { background-position: -220% 0; } }
 @media (max-width: 800px) {

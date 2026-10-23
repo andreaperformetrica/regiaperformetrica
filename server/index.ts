@@ -2,44 +2,32 @@ import express, { type ErrorRequestHandler } from "express";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { clerkMiddleware } from "@clerk/express";
-import { publishableKeyFromHost } from "@clerk/shared/keys";
-import { CLERK_PROXY_PATH, clerkProxyMiddleware, getClerkProxyHost } from "./middlewares/clerkProxyMiddleware";
 import { createTeamRouter, teamGuard } from "./team";
+import { pool, seedAdmin } from "./store";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
-  throw new Error("Configura l’autenticazione Clerk prima di avviare Regia.");
-}
+await seedAdmin();
 const app = express();
 const httpServer = createServer(app);
 app.disable("x-powered-by");
+app.set("trust proxy", 1);
 
-app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
 app.use(express.json({ limit: "8kb" }));
 app.use(express.urlencoded({ extended: true, limit: "8kb" }));
-app.use(
-  clerkMiddleware((req) => ({
-    publishableKey: publishableKeyFromHost(
-      getClerkProxyHost(req) ?? "",
-      process.env.CLERK_PUBLISHABLE_KEY,
-    ),
-  })),
-);
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "same-origin");
   res.setHeader("Cache-Control", "private, no-store");
   next();
 });
-app.use("/api", createTeamRouter());
+app.use("/api", await createTeamRouter(pool));
 app.use("/api", (_req, res) => res.status(404).json({ error: "Risorsa non trovata." }));
 
-app.get("/workspace", teamGuard(), async (_req, res) => {
+app.get("/workspace", teamGuard(pool), async (_req, res) => {
   const source = await readFile(`${root}index.html`, "utf8");
   const authData = JSON.stringify({
-    userId: res.locals.account.id,
-    migrateLegacy: res.locals.clerkUser.publicMetadata.regiaSeededAdmin === true,
+    userId: res.locals.accountRow.storage_id,
+    migrateLegacy: res.locals.accountRow.legacy_admin,
   }).replace(/</g, "\\u003c");
   res.type("html").send(source.replace("<script>", `<script>window.REGIA_AUTH=${authData};</script><script>`));
 });
@@ -86,12 +74,12 @@ if (process.env.NODE_ENV === "production") {
 }
 
 function isAppRoute(path: string) {
-  return path === "/" || path === "/user-portal" || path === "/team" ||
+  return path === "/" || path === "/user-portal" || path === "/team" || path === "/password" ||
     /^\/sign-(in|up)(\/.*)?$/.test(path);
 }
 
 const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
-  // Avoid logging Clerk request payloads, email addresses, invitation URLs or tokens.
+  // Never log password payloads, email addresses, invitation URLs or session tokens.
   console.error("Regia request failed:", error?.name || "Error", error?.status || 500);
   if (!res.headersSent) {
     const status = error?.type === "entity.parse.failed" ? 400 :

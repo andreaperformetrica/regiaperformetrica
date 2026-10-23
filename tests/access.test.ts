@@ -1,42 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { accountFor, normalizeEmail, validEmail, type ClerkUserLike } from "../server/access";
+import { hashPassword, checkPassword, tokenHash, newToken, validPassword, validEmail } from "../server/access";
 
-const base: ClerkUserLike = {
-  id: "test_user",
-  firstName: "Test",
-  lastName: "Member",
-  primaryEmailAddressId: "primary",
-  emailAddresses: [{ id: "primary", emailAddress: "Member@Example.test", verification: { status: "verified" } }],
-  publicMetadata: {},
-};
-
-test("a verified account without an invitation cannot access Regia", () => {
-  assert.equal(accountFor(base), null);
+test("passwords are salted, hashed and verified without plaintext storage", async () => {
+  const value = newToken();
+  const first = await hashPassword(value);
+  const second = await hashPassword(value);
+  assert.ok(first !== second && !first.includes(value));
+  assert.ok(await checkPassword(value, first));
+  assert.equal(await checkPassword("different test passphrase", first), false);
+  assert.equal(await checkPassword(value, "corrupt"), false);
 });
-
-test("only a true backend authorization grants access", () => {
-  assert.equal(accountFor({ ...base, publicMetadata: { regiaAccess: "true", regiaRole: "admin" } }), null);
-  assert.equal(accountFor({ ...base, publicMetadata: { regiaAccess: false, regiaRole: "admin" } }), null);
-  const account = accountFor({ ...base, publicMetadata: { regiaAccess: true } });
-  assert.equal(account?.email, "member@example.test");
-  assert.equal(account?.isAdmin, false);
-});
-
-test("admin role requires authorized access and a verified primary email", () => {
-  assert.equal(accountFor({ ...base, publicMetadata: { regiaAccess: true, regiaRole: "admin" } })?.isAdmin, true);
-  assert.equal(accountFor({
-    ...base,
-    publicMetadata: { regiaAccess: true, regiaRole: "admin" },
-    emailAddresses: [{ ...base.emailAddresses[0], verification: { status: "unverified" } }],
-  }), null);
-  assert.equal(accountFor({ ...base, primaryEmailAddressId: "missing", publicMetadata: { regiaAccess: true } }), null);
-});
-
-test("email input is normalized and invalid payloads are rejected", () => {
-  assert.equal(normalizeEmail("  Member@Example.test "), "member@example.test");
+test("password and email validation rejects unsafe or incomplete input", () => {
+  assert.ok(validPassword("una frase lunga per test"));
+  for(const value of [null, "", "short", "a".repeat(129)]) assert.equal(validPassword(value), false);
   assert.ok(validEmail("member@example.test"));
-  for (const input of [undefined, null, {}, "", "missing-domain", "x@bad", "<x>@example.test", "a b@example.test", "a".repeat(255) + "@example.test"]) {
-    assert.equal(validEmail(input), false);
-  }
+  for(const value of [null, "", "bad", "x@bad", "<x>@example.test"]) assert.equal(validEmail(value), false);
+});
+test("session and invitation tokens have enough entropy and are stored by hash", () => {
+  const token = newToken();
+  assert.match(token, /^[a-f0-9]{64}$/);
+  assert.ok(tokenHash(token) !== token && newToken() !== token);
 });
