@@ -2,7 +2,19 @@
 
 Gestore di attività per il team di Performetrica. Prende spunto da ClickUp e Asana: elenco, bacheca, timeline e calendario, clienti, carico di lavoro, approvazioni, dipendenze, automazioni e Claude integrato.
 
-L'app è un unico file: `index.html` (HTML, CSS e JavaScript, senza dipendenze da installare).
+L’app operativa originale resta in `index.html` (HTML, CSS e JavaScript).
+Su Replit è protetta da un server Express e da pagine di accesso React con
+Clerk; solo gli account autorizzati dal team possono caricarla.
+
+## Avvio su Replit
+
+Avvia il workflow **Regia** con Run oppure esegui `npm run dev`.
+Per dettagli su login, primo amministratore e inviti consulta `replit.md`.
+`npm test` esegue i controlli automatici e `npm run build` prepara la versione
+compilata.
+
+Gli inviti proteggono l’accesso all’app, ma le attività restano nel browser,
+separate per account: non sono sincronizzate tra membri o dispositivi.
 
 ## Dove gira oggi
 
@@ -21,7 +33,11 @@ I dati non stanno in questo repository: sono nel database dell'Artifact su claud
 
 ## Aprirla in locale
 
-Apri `index.html` nel browser, oppure:
+Per studiare la sola versione importata, puoi ancora aprire `index.html`
+direttamente nel browser. Questo non usa il nuovo login e non è il modo
+corretto di servire Regia su Replit o su un dominio pubblico.
+
+Solo per consultazione locale offline:
 
 ```bash
 python3 -m http.server 8765

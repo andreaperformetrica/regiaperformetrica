@@ -743,7 +743,20 @@ const NKIND={assign:['user-plus','ti ha assegnato'],mention:['at',''],comment:['
 const $=(s,el=document)=>el.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
-const LS={get(k,d){try{const v=localStorage.getItem('regia.'+k);return v==null?d:JSON.parse(v)}catch{return d}},set(k,v){try{localStorage.setItem('regia.'+k,JSON.stringify(v))}catch{}}};
+// Account-specific local data. Only the initially invited administrator may
+// copy the pre-login workspace; originals are retained and never overwritten.
+const LS_PREFIX=window.REGIA_AUTH?.userId?'regia.user.'+window.REGIA_AUTH.userId+'.':'regia.';
+if(window.REGIA_AUTH?.migrateLegacy){try{
+  if(!localStorage.getItem(LS_PREFIX+'legacyCopied')){
+    if(localStorage.getItem(LS_PREFIX+'localdata')===null){
+      Object.keys(localStorage).filter(k=>k.startsWith('regia.')&&!k.startsWith('regia.user.')).forEach(k=>{
+        const to=LS_PREFIX+k.slice(6);if(localStorage.getItem(to)===null)localStorage.setItem(to,localStorage.getItem(k));
+      });
+    }
+    localStorage.setItem(LS_PREFIX+'legacyCopied','true');
+  }
+}catch{}}
+const LS={get(k,d){try{const v=localStorage.getItem(LS_PREFIX+k);return v==null?d:JSON.parse(v)}catch{return d}},set(k,v){try{localStorage.setItem(LS_PREFIX+k,JSON.stringify(v))}catch{}}};
 const norm=x=>String(x||'').toLowerCase().normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]/g,'');
 const pad=n=>String(n).padStart(2,'0');
 const ymd=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;

@@ -1,0 +1,1 @@
+- [Package resolver compatibility](package-resolver.md) — npm can fail on newer Vite peer graphs; prefer the existing compatible major before retrying installs.
